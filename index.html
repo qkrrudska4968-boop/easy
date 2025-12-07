@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>SimpleCAD Web Tool v8 (줌 기능 추가)</title>
+    <style>
+        #drawingCanvas {
+            border: 2px solid #ccc;
+            background-color: #f4f4f4;
+            cursor: crosshair;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+        button {
+            padding: 5px 10px;
+            margin: 3px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .mode-active {
+            background-color: #4CAF50;
+            color: white;
+            font-weight: bold;
+        }
+        .mode-arc {
+            background-color: #2196F3;
+            color: white;
+        }
+        #coordDisplay {
+            margin-top: 10px;
+            padding: 5px;
+            border: 1px solid #aaa;
+            background-color: #e0e0e0;
+            font-weight: bold;
+        }
+        .control-group {
+            margin: 15px 0;
+            padding: 10px;
+            border: 1px dashed #ccc;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <h2>SimpleCAD Drawing Tool v8 (줌 기능 추가)</h2>
+    
+    <button onclick="clearCanvas()">모두 지우기</button>
+    <button onclick="undoLastLine()">실행 취소 (Undo)</button> 
+    <button onclick="changeColor('red')">빨간 선</button>
+    <button onclick="changeColor('blue')">파란 선</button>
+    <br>
+    <button id="zoomInBtn" onclick="applyZoom(1.1)">🔍 줌인 (+)</button>
+    <button id="zoomOutBtn" onclick="applyZoom(0.9)">🔍 줌아웃 (-)</button>
+    <br><br>
+    
+    <button id="lineModeBtn" onclick="toggleLineMode()" class="mode-active">라인 그리기 (ON)</button>
+    <button id="arcModeBtn" onclick="toggleArcMode()">원호 그리기 (OFF)</button>
+
+    <div class="control-group">
+        <p>버튼으로 치수 입력 후 그리기:</p>
+        <button onclick="drawDimensionedLine('right')">→ 오른쪽</button>
+        <button onclick="drawDimensionedLine('left')">← 왼쪽</button>
+        <button onclick="drawDimensionedLine('up')">↑ 위쪽</button>
+        <button onclick="drawDimensionedLine('down')">↓ 아래쪽</button>
+    </div>
+    
+    <canvas id="drawingCanvas" width="800" height="600"></canvas>
+    
+    <div id="coordDisplay">
+        현재 좌표: X = 400, Y = 300 | 스케일: 1.0
+    </div>
+
+    <script>
+        const canvas = document.getElementById('drawingCanvas');
+        const ctx = canvas.getContext('2d');
+        const coordDisplay = document.getElementById('coordDisplay');
+        const lineModeBtn = document.getElementById('lineModeBtn');
+        const arcModeBtn = document.getElementById('arcModeBtn');
+
+        let isLineMode = true;
+        let isArcMode = false;
+        
+        let drawnLines = []; 
+        let isDrawing = false; 
+        let currentLineColor = 'blue'; 
+        
+        // 줌 및 좌표계 변수 추가
+        let scale = 1.0; 
+        let lastX = canvas.width / 2;
+        let lastY = canvas.height / 2; 
+        let startX = 0;
+        let startY = 0;
+        
+        let arcPoints = [];
+
+        updateCoordDisplay();
+
+        // --- 줌 컨트롤 함수 ---
+        function applyZoom(factor) {
+            scale *= factor;
+            // 최소/최대 줌 제한 (예: 0.2배 ~ 5배)
+            scale = Math.max(0.2, Math.min(5.0, scale));
+            redrawAll();
+            updateCoordDisplay();
+        }
+        
+        // --- 캔버스 좌표를 실제 도면 좌표로 변환 ---
+        function getRealCoords(canvasX, canvasY) {
+            return {
+                x: canvasX / scale,
+                y: canvasY / scale
+            };
+        }
+        
+        // --- 실제 도면 좌표를 캔버스 좌표로 변환 ---
+        function getCanvasCoords(realX, realY) {
+            return {
+                x: realX * scale,
+                y: realY * scale
+            };
+        }
+
+        // --- 모드 토글 함수 ---
+        function toggleLineMode() {
+            if (isArcMode) toggleArcMode();
+            isLineMode = true;
+            lineModeBtn.classList.add('mode-active');
+            lineModeBtn.textContent = "라인 그리기 (ON)";
+            arcPoints = [];
+        }
+
+        function toggleArcMode() {
+            if (isLineMode) {
+                isLineMode = false;
+                lineModeBtn.classList.remove('mode-active');
+                lineModeBtn.textContent = "라인 그리기 (OFF)";
+            }
+            isArcMode = !isArcMode;
+            if (isArcMode) {
+                arcModeBtn.classList.add('mode-arc');
+                arcModeBtn.textContent = "원호 그리기 (ON) - 3점 클릭";
+            } else {
+                arcModeBtn.classList.remove('mode-arc');
+                arcModeBtn.textContent = "원호 그리기 (OFF)";
+                arcPoints = [];
+            }
+            updateCoordDisplay();
+        }
+        
+        // --- 유틸리티: 좌표 업데이트 함수 ---
+        function updateCoordDisplay() {
+            coordDisplay.textContent = `현재 좌표: X = ${Math.round(lastX)}, Y = ${Math.round(lastY)} | 스케일: ${scale.toFixed(2)}`;
+            if (isArcMode && arcPoints.length > 0) {
+                 coordDisplay.textContent += ` | 원호 클릭 (${arcPoints.length} / 3)`;
+            }
+        }
+
+        // --- 핵심: 모든 선 다시 그리기 ---
+        function redrawAll() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawnLines.forEach(item => {
+                if (item.type === 'line') {
+                    const p1 = getCanvasCoords(item.x1, item.y1);
+                    const p2 = getCanvasCoords(item.x2, item.y2);
+                    drawSingleLine(p1.x, p1.y, p2.x, p2.y, item.color);
+                    drawDimension(p1.x, p1.y, p2.x, p2.y);
+                } else if (item.type === 'arc') {
+                    const p1 = getCanvasCoords(item.p1.x, item.p1.y);
+                    const p2 = getCanvasCoords(item.p2.x, item.p2.y);
+                    const p3 = getCanvasCoords(item.p3.x, item.p3.y);
+                    drawSingleArc({x: p1.x, y: p1.y}, {x: p2.x, y: p2.y}, {x: p3.x, y: p3.y}, item.color, item.realRadius);
+                }
+            });
+        }
+        
+        function drawSingleLine(x1, y1, x2, y2, color) {
+             ctx.strokeStyle = color;
+             ctx.lineWidth = 2;
+             ctx.beginPath();
+             ctx.moveTo(x1, y1);
+             ctx.lineTo(x2, y2);
+             ctx.stroke();
+        }
+        
+        function drawLineAndSave(x1, y1, x2, y2, color) {
+            // 저장할 때는 실제 도면 좌표(줌 적용 안 된)로 저장
+            drawnLines.push({type: 'line', x1, y1, x2, y2, color});
+
+            // 화면에 그릴 때는 캔버스 좌표(줌 적용된)로 변환
+            const cp1 = getCanvasCoords(x1, y1);
+            const cp2 = getCanvasCoords(x2, y2);
+            drawSingleLine(cp1.x, cp1.y, cp2.x, cp2.y, color);
+            drawDimension(cp1.x, cp1.y, cp2.x, cp2.y);
+        }
+
+        function drawDimension(x1, y1, x2, y2) {
+            // 치수는 실제 길이(줌 적용 안 된 길이)를 표시합니다.
+            const length = Math.round(Math.sqrt(Math.pow((x2 - x1)/scale, 2) + Math.pow((y2 - y1)/scale, 2)));
+            const midX = (x1 + x2) / 2;
+            const midY = (y1 + y2) / 2;
+            
+            ctx.fillStyle = "black";
+            ctx.font = `${12 / scale}px Arial`; // 폰트 크기도 줌에 따라 조정
+            ctx.textAlign = "center";
+            ctx.fillText(`${length} px`, midX, midY - (5 / scale));
+        }
+
+        // --- 원호(Arc) 그리기 전용 함수 ---
+        function getArcCenterAndRadius(p1, p2, p3) {
+             // 좌표 계산은 캔버스 좌표가 아닌 실제 도면 좌표를 사용해야 합니다.
+            const x1 = p1.x, y1 = p1.y;
+            const x2 = p2.x, y2 = p2.y;
+            const x3 = p3.x, y3 = p3.y;
+
+            const D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
+            if (Math.abs(D) < 1e-6) return null;
+
+            const cx = ((x1 * x1 + y1 * y1) * (y2 - y3) + (x2 * x2 + y2 * y2) * (y3 - y1) + (x3 * x3 + y3 * y3) * (y1 - y2)) / D;
+            const cy = ((x1 * x1 + y1 * y1) * (x3 - x2) + (x2 * x2 + y2 * y2) * (x1 - x3) + (x3 * x3 + y3 * y3) * (x2 - x1)) / D;
+            const radius = Math.sqrt((x1 - cx) * (x1 - cx) + (y1 - cy) * (y1 - cy));
+
+            return { cx, cy, radius };
+        }
+
+        function drawSingleArc(p1, p2, p3, color, realRadius) {
+            // 이 함수는 이미 캔버스 좌표를 받아 렌더링만 수행합니다. (redrawAll에서 호출됨)
+            const arcData = getArcCenterAndRadius(p1, p2, p3);
+            if (!arcData) return;
+
+            // cx, cy, radius는 이미 캔버스 스케일이 적용된 좌표입니다.
+            const { cx, cy, radius } = arcData; 
+            let startAngle = Math.atan2(p1.y - cy, p1.x - cx);
+            let endAngle = Math.atan2(p3.y - cy, p3.x - cx);
+            let counterClockwise = false; 
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            ctx.arc(cx, cy, radius, startAngle, endAngle, counterClockwise); 
+            ctx.stroke();
+
+            const chordLength = Math.sqrt(Math.pow(p3.x - p1.x, 2) + Math.pow(p3.y - p1.y, 2)) / scale;
+            
+            ctx.fillStyle = "black";
+            ctx.font = `${12 / scale}px Arial`;
+            ctx.textAlign = "center";
+            ctx.fillText(`Radius: ${Math.round(realRadius)} px, Chord: ${Math.round(chordLength)} px`, cx, cy + (radius / 2) * Math.sin(startAngle) + (radius / 2) * Math.sin(endAngle));
+        }
+        
+        function drawArcAndSave(p1, p2, p3, color) {
+            const realArcData = getArcCenterAndRadius(p1, p2, p3);
+            if (!realArcData) return;
+
+            const { radius } = realArcData;
+            
+            drawnLines.push({type: 'arc', p1: p1, p2: p2, p3: p3, color: color, realRadius: radius});
+        }
+
+
+        // --- 방향 선택 치수선 강제 그리기 함수 ---
+        function drawDimensionedLine(direction) {
+            const lengthStr = prompt(`선 길이(px)를 입력하세요.`, 100);
+            const length = parseInt(lengthStr);
+
+            if (isNaN(length) || length < 10) return;
+            
+            let endX = lastX; 
+            let endY = lastY; 
+            
+            switch (direction) {
+                case 'right': endX = lastX + length; break;
+                case 'left': endX = lastX - length; break;
+                case 'up': endY = lastY - length; break;
+                case 'down': endY = lastY + length; break;
+                default: return;
+            }
+            
+            drawLineAndSave(lastX, lastY, endX, endY, currentLineColor);
+            lastX = endX;
+            lastY = endY;
+            redrawAll(); // 줌이 적용되도록 다시 그립니다.
+            updateCoordDisplay();
+        }
+        
+        // --- 마우스 이벤트 핸들러 ---
+        canvas.addEventListener('mousedown', (e) => {
+            const realClick = getRealCoords(e.offsetX, e.offsetY);
+            const clickX = realClick.x;
+            const clickY = realClick.y;
+
+            // 1. 원호 모드 (Arc Mode) 처리
+            if (isArcMode) {
+                arcPoints.push({x: clickX, y: clickY});
+                
+                if (arcPoints.length === 3) {
+                    const p1 = arcPoints[0];
+                    const p3 = arcPoints[2];
+                    
+                    drawArcAndSave(arcPoints[0], arcPoints[1], arcPoints[2], currentLineColor);
+                    redrawAll();
+                    arcPoints = [];
+                    lastX = p3.x; // 실제 좌표 저장
+                    lastY = p3.y;
+                } else {
+                    updateCoordDisplay();
+                }
+                return;
+            }
+            
+            // 2. 라인 모드 (Line Mode) 처리
+            if (isLineMode) {
+                // 마우스 클릭 시점의 실제 좌표를 저장
+                [startX, startY] = [clickX, clickY];
+                isDrawing = true;
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const realMove = getRealCoords(e.offsetX, e.offsetY);
+            lastX = realMove.x; // 실제 좌표 업데이트
+            lastY = realMove.y;
+            updateCoordDisplay();
+
+            if (isLineMode && isDrawing) {
+                redrawAll();
+                // 캔버스 좌표를 사용하여 임시 선을 그립니다.
+                drawSingleLine(e.offsetX, e.offsetY, getCanvasCoords(startX, startY).x, getCanvasCoords(startX, startY).y, currentLineColor);
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (!isLineMode || !isDrawing) return;
+            isDrawing = false;
+            
+            const realUp = getRealCoords(e.offsetX, e.offsetY);
+            let endX = realUp.x;
+            let endY = realUp.y;
+            
+            drawLineAndSave(startX, startY, endX, endY, currentLineColor);
+            
+            lastX = endX;
+            lastY = endY;
+            redrawAll();
+            updateCoordDisplay();
+        });
+
+        // --- 더블클릭 치수 수정 (라인에만 적용) ---
+        canvas.addEventListener('dblclick', handleDblClick);
+
+        function handleDblClick(e) {
+            const realClick = getRealCoords(e.offsetX, e.offsetY);
+            const clickX = realClick.x; // 실제 좌표 사용
+            const clickY = realClick.y;
+            
+            const clickedLineIndex = drawnLines.findIndex(item => {
+                if (item.type !== 'line') return false;
+                const line = item;
+                
+                // 실제 좌표를 기준으로 클릭 영역 판단
+                const minX = Math.min(line.x1, line.x2) - 5;
+                const maxX = Math.max(line.x1, line.x2) + 5;
+                const minY = Math.min(line.y1, line.y2) - 5;
+                const maxY = Math.max(line.y1, line.y2) + 5;
+                return clickX >= minX && clickX <= maxX && clickY >= minY && clickY <= maxY;
+            });
+
+            if (clickedLineIndex !== -1) {
+                const line = drawnLines[clickedLineIndex];
+                
+                const currentLength = Math.round(Math.sqrt(Math.pow(line.x2 - line.x1, 2) + Math.pow(line.y2 - line.y1, 2)));
+                const newLengthStr = prompt(`새 길이를 입력하세요 (현재 길이: ${currentLength} px):`, currentLength);
+                const newLength = parseInt(newLengthStr);
+
+                if (!isNaN(newLength) && newLength > 0 && newLength !== currentLength) {
+                    
+                    const dx = line.x2 - line.x1;
+                    const dy = line.y2 - line.y1;
+                    const angle = Math.atan2(dy, dx); 
+
+                    line.x2 = line.x1 + newLength * Math.cos(angle);
+                    line.y2 = line.y1 + newLength * Math.sin(angle);
+                    
+                    if (clickedLineIndex === drawnLines.length - 1) {
+                        lastX = line.x2;
+                        lastY = line.y2;
+                        updateCoordDisplay();
+                    }
+                    
+                    redrawAll(); 
+                }
+            }
+        }
+        
+        // --- 기능: 실행 취소 (Undo) ---
+        function undoLastLine() {
+            if (drawnLines.length > 0) {
+                drawnLines.pop(); 
+                redrawAll(); 
+                
+                if (drawnLines.length > 0) {
+                    const lastDrawn = drawnLines[drawnLines.length - 1];
+                    lastX = lastDrawn.type === 'line' ? lastDrawn.x2 : lastDrawn.p3.x;
+                    lastY = lastDrawn.type === 'line' ? lastDrawn.y2 : lastDrawn.p3.y;
+                } else {
+                    lastX = canvas.width / 2;
+                    lastY = canvas.height / 2;
+                }
+                arcPoints = [];
+                updateCoordDisplay();
+            }
+        }
+        
+        // --- 유틸리티 함수 ---
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawnLines = []; 
+            arcPoints = [];
+            scale = 1.0; // 줌 초기화
+            lastX = canvas.width / 2;
+            lastY = canvas.height / 2; 
+            updateCoordDisplay(); 
+        }
+
+        function changeColor(newColor) {
+            currentLineColor = newColor;
+        }
+        
+        canvas.addEventListener('mouseout', () => isDrawing = false);
+
+    </script>
+</body>
+</html>
